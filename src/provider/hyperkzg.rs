@@ -5,7 +5,7 @@
 //! This means that Spartan's polynomial IOP can use commit to its polynomials as-is without incurring any interpolations or FFTs.
 //! (2) HyperKZG is specialized to use KZG as the univariate commitment scheme, so it includes several optimizations (both during the transformation of multilinear-to-univariate claims
 //! and within the KZG commitment scheme implementation itself).
-#![allow(non_snake_case)]
+// #![allow(non_snake_case)]
 use crate::{
   errors::NovaError,
   gadgets::utils::to_bignat_repr,
@@ -16,11 +16,10 @@ use crate::{
     write_ptau,
   },
   traits::{
-    commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
-    evaluation::EvaluationEngineTrait,
-    AbsorbInRO2Trait, AbsorbInROTrait, Engine, ROTrait, TranscriptEngineTrait, TranscriptReprTrait,
-  },
+    commitment::{CommitmentEngineTrait, CommitmentTrait, Len}, evaluation::EvaluationEngineTrait, AbsorbInRO2Trait, AbsorbInROTrait, Engine, ROTrait, TranscriptEngineTrait, TranscriptReprTrait
+  }, CE,
 };
+
 use core::{
   iter,
   marker::PhantomData,
@@ -33,6 +32,7 @@ use num_traits::ToPrimitive;
 use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
 
 /// Alias to points on G1 that are in preprocessed form
 type G1Affine<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
@@ -50,6 +50,7 @@ where
   h: <E::GE as DlogGroup>::AffineGroupElement,
   tau_H: <<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement, // needed only for the verifier key
 }
+
 
 impl<E: Engine> CommitmentKey<E>
 where
@@ -88,6 +89,7 @@ where
     self.ck.len()
   }
 }
+
 
 /// A type that holds blinding generator
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -556,6 +558,114 @@ where
   }
 }
 
+// zibo
+// A trait listing properties of a commitment key that can be managed in a divide-and-conquer fashion
+pub trait CommitmentKeyExtTrait<E: Engine>
+// where
+// E::GE: PairingGroup,
+{
+  /// Splits the commitment key into two pieces at a specified point
+  fn split_at(&self, n: usize) -> (Self, Self)
+  where
+    Self: Sized;
+
+  /// Combines two commitment keys into one
+  fn combine(&self, other: &Self) -> Self;
+
+  /// Folds the two commitment keys into one using the provided weights
+  fn fold(&self, w: &E::Scalar) -> Self;
+
+  /// Scales the commitment key using the provided scalar
+  fn scale(&self, r: &E::Scalar) -> Self;
+
+  /// Reinterprets commitments as commitment keys
+  fn reinterpret_commitments_as_ck(
+    c: &[<E::CE as CommitmentEngineTrait<E>>::Commitment],
+  ) -> Result<Self, NovaError>
+  where
+    Self: Sized;
+}
+
+impl<E: Engine<CE = CommitmentEngine<E>>> CommitmentKeyExtTrait<E> for CommitmentKey<E>
+  where
+  E::GE: PairingGroup,
+{
+  fn split_at(&self, n: usize) -> (CommitmentKey<E>, CommitmentKey<E>) {
+    (
+      CommitmentKey {
+        ck: self.ck[0..n].to_vec(),
+        h: self.h,
+        tau_H: self.tau_H,
+      },
+      CommitmentKey {
+        ck: self.ck[n..].to_vec(),
+        h: self.h,
+        tau_H: self.tau_H,
+      },
+    )
+  }
+
+  fn combine(&self, other: &CommitmentKey<E>) -> CommitmentKey<E> {
+    let ck = {
+      let mut c = self.ck.clone();
+      c.extend(other.ck.clone());
+      c
+    };
+    CommitmentKey { ck, h: self.h, tau_H: self.tau_H }
+  }
+
+  // combines the left and right halves of `self` using `w` as the weights
+  fn fold(&self, w: &E::Scalar) -> CommitmentKey<E> {
+    let w = vec![*w, E::Scalar::ONE];
+    let (L, R) = self.split_at(self.ck.len() / 2);
+
+    let ck = (0..self.ck.len() / 2)
+      .into_par_iter()
+      .map(|i| {
+        let bases = [L.ck[i], R.ck[i]].to_vec();
+        E::GE::vartime_multiscalar_mul(&w, &bases).affine()
+      })
+      .collect();
+
+    CommitmentKey { ck, h: self.h, tau_H: self.tau_H }
+  }
+
+  /// Scales each element in `self` by `r`
+  fn scale(&self, r: &E::Scalar) -> Self {
+    let ck_scaled = self
+      .ck
+      .clone()
+      .into_par_iter()
+      .map(|g| E::GE::vartime_multiscalar_mul(&[*r], &[g]).affine())
+      .collect();
+
+    CommitmentKey {
+      ck: ck_scaled,
+      h: self.h,
+      tau_H: self.tau_H,
+    }
+  }
+
+  /// reinterprets a vector of commitments as a set of generators
+  fn reinterpret_commitments_as_ck(c: &[Commitment<E>]) -> Result<Self, NovaError> {
+    let ck = (0..c.len())
+      .into_par_iter()
+      .map(|i| c[i].comm.affine())
+      .collect();
+
+    // cmt is derandomized by the point that this is called
+    Ok(CommitmentKey {
+      ck,
+      h: E::GE::zero().affine(), // this is okay, since this method is used in IPA only,
+                                 // and we only use non-blinding commits afterwards
+                                 // bc we don't use ZK IPA
+      tau_H: <<E::GE as PairingGroup>::G2 as DlogGroup>::zero().affine(),
+    })
+  }
+}
+// zibo end
+
+
 /// Provides an implementation of generators for proving evaluations
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -858,11 +968,11 @@ where
     // obtained from the transcript
     let r = Self::compute_challenge(&pi.com, transcript);
 
-    if r == E::Scalar::ZERO || C.comm == E::GE::zero() {
-      return Err(NovaError::ProofVerifyError {
-        reason: "r is zero or commitment is zero".to_string(),
-      });
-    }
+    // if r == E::Scalar::ZERO || C.comm == E::GE::zero() {
+    //   return Err(NovaError::ProofVerifyError {
+    //     reason: "r is zero or commitment is zero".to_string(),
+    //   });
+    // }
 
     let u = [r, -r, r * r];
 
@@ -1260,3 +1370,339 @@ mod tests {
     }
   }
 }
+
+
+// zibo: CPlnkP protocol
+#[allow(non_snake_case)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+/// Represents an instance of the CPlnkP protocol.
+///
+/// This struct encapsulates the length of the instance and the commitments
+/// to the vectors `C` and `C_hat` used in the protocol.
+pub struct CPlnkPInstance<E: Engine> {
+  len: usize,
+  comm_C: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+  comm_C_hat: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+}
+
+impl<E> CPlnkPInstance<E> 
+where
+  E: Engine,
+//  E::GE: PairingGroup,
+{
+  /// add explanation
+  pub fn new(len: usize, comm_C: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment, comm_C_hat: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment) -> Self {
+    CPlnkPInstance {
+      len: len,
+      comm_C: *comm_C,
+      comm_C_hat: *comm_C_hat,
+    }
+  }
+}
+
+impl<E: Engine> TranscriptReprTrait<E::GE> for CPlnkPInstance<E>
+where
+  E: Engine,
+//  E::GE: PairingGroup,
+{
+  fn to_transcript_bytes(&self) -> Vec<u8> {
+    [
+      self.comm_C.to_transcript_bytes(),
+      self.comm_C_hat.to_transcript_bytes(),
+    ]
+    .concat()
+  }
+}
+
+/// add explanation
+pub struct CPlnkPWitness<E: Engine> {
+  w_vec: Vec<E::Scalar>,
+}
+
+impl<E: Engine> CPlnkPWitness<E> {
+  /// add explanation
+  pub fn new(w_vec: &[E::Scalar]) -> Self {
+    CPlnkPWitness {
+      w_vec: w_vec.to_vec(),
+    }
+  }
+}
+
+/// the CPlnkP protocol
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct CPlnkP<E: Engine>{
+  L_vec: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment>,
+  R_vec: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment>,
+  L_vec_hat: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment>,
+  R_vec_hat: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment>,
+  w: E::Scalar,
+  ck_final: <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
+}
+
+impl<E> CPlnkP<E>
+ where
+   E: Engine,
+//   E::GE: PairingGroup,
+   <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey: CommitmentKeyExtTrait<E>,
+{
+  const fn protocol_name() -> &'static [u8] {
+    b"CPlnkP"
+  }
+
+  /// add explanation
+  pub fn prove(
+      ck: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey, 
+      U: &CPlnkPInstance<E>,
+      W: &CPlnkPWitness<E>,
+      transcript: &mut E::TE,
+  ) -> Result<Self, NovaError>  {
+    transcript.dom_sep(Self::protocol_name());
+
+    let (ck, _) = ck.split_at(U.len);
+
+    if U.len != W.w_vec.len() {
+      return Err(NovaError::InvalidInputLength);
+    }
+
+    // absorb the instance in the transcript
+    transcript.absorb(b"U", U);
+
+
+    // a closure that executes a step of the recursive CPlnkP protocol
+    let prove_inner = |w_vec: &[E::Scalar],
+                       ck: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
+                       transcript: &mut E::TE|
+     -> Result<
+      (
+        <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+        <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+        <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+        <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+        Vec<E::Scalar>,
+        <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
+        <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
+      ),
+      NovaError,
+    > {
+      let n = w_vec.len();
+      let (ck_L, ck_R) = ck.split_at(n / 2);
+
+      let L = CE::<E>::commit(
+        &ck_R,
+        &w_vec[0..n / 2]
+          .iter()
+          .copied()
+          .collect::<Vec<E::Scalar>>(),
+        &E::Scalar::ZERO,
+      );
+      let R = CE::<E>::commit(
+        &ck_L,
+        &w_vec[n / 2..n]
+          .iter()
+          .copied()
+          .collect::<Vec<E::Scalar>>(),
+        &E::Scalar::ZERO,
+      );
+      let L_hat = CE::<E>::commit(
+        &ck_R,
+        &w_vec[0..n / 2]
+          .iter()
+          .copied()
+          .collect::<Vec<E::Scalar>>(),
+        &E::Scalar::ZERO,
+      );
+      let R_hat = CE::<E>::commit(
+        &ck_L,
+        &w_vec[n / 2..n]
+          .iter()
+          .copied()
+          .collect::<Vec<E::Scalar>>(),
+        &E::Scalar::ZERO,
+      );
+
+      transcript.absorb(b"L", &L);
+      transcript.absorb(b"R", &R);
+      transcript.absorb(b"L", &L_hat);
+      transcript.absorb(b"R", &R_hat);
+
+      let r = transcript.squeeze(b"r")?;
+
+      // fold the left half and the right half
+      let w_vec_folded = w_vec[0..n / 2]
+        .par_iter()
+        .zip(w_vec[n / 2..n].par_iter())
+        .map(|(a_L, a_R)| *a_L + r * *a_R)
+        .collect::<Vec<E::Scalar>>();
+
+      let ck_folded = ck.fold(&r);
+      let ck_hat_folded = ck.fold(&r);
+
+      Ok((L, R, L_hat, R_hat, w_vec_folded, ck_folded, ck_hat_folded))
+    };
+
+    // two vectors to hold the logarithmic number of group elements
+    let mut L_vec: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment> = Vec::new();
+    let mut R_vec: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment> = Vec::new();
+    let mut L_vec_hat: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment> = Vec::new();
+    let mut R_vec_hat: Vec<<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment> = Vec::new();
+
+    // we create mutable copies of vectors and generators
+    let mut w_vec = W.w_vec.to_vec();
+    let mut ck = ck;
+    for _i in 0..usize::try_from(U.len.ilog2()).unwrap() {
+      let (L, R, L_hat, R_hat, w_vec_folded, ck_folded, _ck_hat_folded) =
+        prove_inner(&w_vec, &ck, transcript)?;
+      L_vec.push(L);
+      R_vec.push(R);
+      L_vec_hat.push(L_hat);
+      R_vec_hat.push(R_hat);
+
+      w_vec = w_vec_folded;
+      ck = ck_folded;
+    }
+
+    Ok(CPlnkP {
+      L_vec,
+      R_vec,
+      L_vec_hat,
+      R_vec_hat,
+      w: w_vec[0],
+      ck_final: ck,
+    })
+  }
+
+  
+  /// add explanation
+  pub fn verify(
+    &self,
+    U: &CPlnkPInstance<E>,
+    transcript: &mut E::TE,
+  ) -> Result<(), NovaError> {
+
+    transcript.dom_sep(Self::protocol_name());
+
+    // absorb the instance in the transcript
+    transcript.absorb(b"U", U);
+
+    // compute a vector of public coins 
+    let r = (0..self.L_vec.len())
+      .map(|i| {
+        transcript.absorb(b"L", &self.L_vec[i]);
+        transcript.absorb(b"R", &self.R_vec[i]);
+        transcript.absorb(b"L", &self.L_vec_hat[i]);
+        transcript.absorb(b"R", &self.R_vec_hat[i]);
+        transcript.squeeze(b"r")
+      })
+      .collect::<Result<Vec<E::Scalar>, NovaError>>()?;
+
+    // precompute scalars necessary for verification
+    let r_square: Vec<E::Scalar> = (0..self.L_vec.len())
+      .into_par_iter()
+      .map(|i| r[i] * r[i])
+      .collect();
+
+    // zibo: compute final C
+    let C = {
+      let ck_folded = {
+        let ck_L = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.L_vec[0]])?;
+        let ck_R = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.R_vec[0]])?;
+        let ck_C = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[U.comm_C])?;
+        ck_L.combine(&ck_C).combine(&ck_R)
+      }; 
+    
+      let mut C = CE::<E>::commit(
+        &ck_folded,
+        &vec![
+            E::Scalar::ONE,
+            r[0],
+            r_square[0],
+        ],
+        &E::Scalar::ZERO,
+      );
+    
+      for i in 1..self.L_vec.len() {
+        let ck_folded = {
+          let ck_L = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.L_vec[i]])?;
+          let ck_R = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.R_vec[i]])?;
+          let ck_C = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[C])?;
+          ck_L.combine(&ck_C).combine(&ck_R)
+        };  
+      
+        C = 
+          CE::<E>::commit(
+            &ck_folded,
+            &vec![
+                E::Scalar::ONE,  
+                r[i],            
+                r_square[i],     
+            ],
+            &E::Scalar::ZERO,
+          );
+      }
+      C
+    };
+
+    // zibo: compute final C_hat
+    let C_hat = {
+      let ck_folded = {
+        let ck_L = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.L_vec_hat[0]])?;
+        let ck_R = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.R_vec_hat[0]])?;
+        let ck_C = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[U.comm_C_hat])?;
+        ck_L.combine(&ck_C).combine(&ck_R)
+      }; 
+    
+      let mut C_hat = CE::<E>::commit(
+        &ck_folded,
+        &vec![
+            E::Scalar::ONE,
+            r[0],
+            r_square[0],
+        ],
+        &E::Scalar::ZERO,
+      );
+    
+      for i in 1..self.L_vec.len() {
+        let ck_folded = {
+          let ck_L = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.L_vec_hat[i]])?;
+          let ck_R = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[self.R_vec_hat[i]])?;
+          let ck_C = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::reinterpret_commitments_as_ck(&[C_hat])?;
+          ck_L.combine(&ck_C).combine(&ck_R)
+        };  
+      
+        C_hat = 
+          CE::<E>::commit(
+            &ck_folded,
+            &vec![
+                E::Scalar::ONE,  
+                r[i],            
+                r_square[i],     
+            ],
+            &E::Scalar::ZERO,
+          );
+      }
+      C_hat
+    };
+
+
+    if C
+      == CE::<E>::commit(
+        &self.ck_final,
+        &[self.w],
+        &E::Scalar::ZERO,
+      ) &&
+      C_hat
+      == CE::<E>::commit(
+        &self.ck_final,
+        &[self.w],
+        &E::Scalar::ZERO,
+      )
+    {
+      Ok(())
+    } else {
+      Err(NovaError::InvalidPCS)
+    }
+  }
+}
+

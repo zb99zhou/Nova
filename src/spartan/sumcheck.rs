@@ -50,7 +50,7 @@ impl<E: Engine> SumcheckProof<E> {
     degree_bound: usize,
     transcript: &mut E::TE,
   ) -> Result<(E::Scalar, Vec<E::Scalar>), NovaError> {
-    let mut e = claim;
+    let mut e: <E as Engine>::Scalar = claim;
     let mut r: Vec<E::Scalar> = Vec::new();
 
     // verify that there is a univariate polynomial for each round

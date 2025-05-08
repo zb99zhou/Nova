@@ -5,10 +5,9 @@
 //! This code includes experimental optimizations to reduce runtimes and proof sizes.
 //! We have not yet proven the security of these optimizations, so this code is subject to significant changes in the future.
 use crate::{
-  digest::{DigestComputer, SimpleDigestible},
-  errors::NovaError,
-  r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
-  spartan::{
+  digest::{DigestComputer, SimpleDigestible}, errors::NovaError, 
+  provider::hyperkzg::{CPlnkP, CPlnkPInstance, CPlnkPWitness, CommitmentKeyExtTrait},
+  r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness}, spartan::{
     math::Math,
     polys::{
       eq::EqPolynomial,
@@ -20,14 +19,12 @@ use crate::{
     powers,
     sumcheck::{SumcheckEngine, SumcheckProof},
     PolyEvalInstance, PolyEvalWitness,
-  },
-  traits::{
+  }, traits::{
     commitment::{CommitmentEngineTrait, Len},
     evaluation::EvaluationEngineTrait,
     snark::{DigestHelperTrait, RelaxedR1CSSNARKTrait},
     Engine, TranscriptEngineTrait, TranscriptReprTrait,
-  },
-  zip_with, Commitment, CommitmentKey,
+  }, zip_with, Commitment, CommitmentKey
 };
 use core::cmp::max;
 use ff::Field;
@@ -912,6 +909,16 @@ pub struct RelaxedR1CSSNARK<E: Engine, EE: EvaluationEngineTrait<E>> {
 
   // a PCS evaluation argument
   eval_arg: EE::EvaluationArgument,
+
+  // zibo: zerocheck PIOP
+  sc_proof_zerocheck: SumcheckProof<E>,
+  eval_w_mid: <E as Engine>::Scalar,
+  com_w_mid: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+  zerocheck_eval_arg: <EE as EvaluationEngineTrait<E>>::EvaluationArgument,
+
+  // zibo: CPlnkP
+  instance: CPlnkPInstance<E>,
+  CPlnkP_proof: CPlnkP<E>,
 }
 
 impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARK<E, EE> {
@@ -1053,7 +1060,10 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> DigestHelperTrait<E> for VerifierK
   }
 }
 
-impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for RelaxedR1CSSNARK<E, EE> {
+impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for RelaxedR1CSSNARK<E, EE> 
+  // where 
+  // <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey: CommitmentKeyExtTrait<E>,
+{
   type ProverKey = ProverKey<E, EE>;
   type VerifierKey = VerifierKey<E, EE>;
 
@@ -1104,6 +1114,10 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
     let S = S.pad();
     // sanity check that R1CSShape has all required size characteristics
     assert!(S.is_regular_shape());
+
+    println!("pad_num_cons: {:?}", S.num_cons);
+    println!("pad_num_vars: {:?}", S.num_vars);
+    println!("pad_num_io: {:?}", S.num_io);
 
     let W = W.pad(&S); // pad the witness
     let mut transcript = E::TE::new(b"RelaxedR1CSSNARK");
@@ -1197,7 +1211,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
             .map(|i| U.u * Cz[i] + E[i])
             .collect::<Vec<E::Scalar>>(),
           w.p.clone(), // Mz = Az + r * Bz + r^2 * Cz
-          &u.e,        // eval_Az_at_tau + r * eval_Az_at_tau + r^2 * eval_Cz_at_tau
+          &u.e,        // eval_Az_at_tau + r * eval_Bz_at_tau + r^2 * eval_Cz_at_tau
         );
 
         // a sum-check instance to prove the second claim
@@ -1374,6 +1388,67 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
 
     let eval_arg = EE::prove(ck, &pk.pk_ee, &mut transcript, &u.c, &w.p, &rand_sc, &u.e)?;
 
+
+    // zibo: zerocheck PIOP
+    // length of committed witness
+    let len_com_w = S.num_vars / 2;
+    
+    let w_mid_prime: Vec<E::Scalar> = vec![E::Scalar::ZERO; len_com_w];
+
+    let num_rounds_zerocheck= usize::try_from(len_com_w.ilog2()).unwrap();
+
+    let mut poly_w_mid_prime = MultilinearPolynomial::new(w_mid_prime.clone());
+    
+    
+    let beta: EqPolynomial<E::Scalar> = (0..num_rounds_zerocheck)
+        .map(|_i| transcript.squeeze(b"beta"))
+        .collect::<Result<EqPolynomial<E::Scalar>, NovaError>>()?;
+
+    let mut poly_beta = MultilinearPolynomial::<E::Scalar>::new(beta.evals());
+    
+    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
+      *poly_A_comp * *poly_B_comp
+    };
+    let (sc_proof_zerocheck, mut r_o, _claims_zerocheck): (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) = SumcheckProof::prove_quad(
+        &E::Scalar::ZERO,
+        num_rounds_zerocheck,
+        &mut poly_w_mid_prime,
+        &mut poly_beta,
+        comb_func,
+        &mut transcript,
+    )?;
+
+  
+    let w_mid: Vec<E::Scalar> = vec![E::Scalar::ONE; S.num_vars];
+    // let poly_w_mid = MultilinearPolynomial::new(w_mid.clone());
+    
+    let com_w_mid = E::CE::commit(&ck, &w_mid, &E::Scalar::ZERO);
+
+    r_o.resize(S.num_vars.ilog2().try_into().unwrap(), E::Scalar::ZERO); 
+    let eval_w_mid = MultilinearPolynomial::evaluate_with(&w_mid, &r_o); 
+
+    let zerocheck_eval_arg = EE::prove(
+      ck,
+      &pk.pk_ee,
+      &mut transcript,
+      &com_w_mid,
+      &w_mid,
+      &r_o,
+      &eval_w_mid,
+    )?;
+
+
+    // zibo: CPlnkP protocol
+    let w: Vec<E::Scalar> = vec![E::Scalar::ONE; len_com_w];
+    let comm_C = E::CE::commit(&ck, &w, &E::Scalar::ZERO);
+
+    let instance = CPlnkPInstance::<E>::new(len_com_w, &comm_C, &comm_C);
+    let witness = CPlnkPWitness::<E>::new(&w);
+
+    let mut transcript = E::TE::new(b"CPlnkP");
+
+    let CPlnkP_proof = CPlnkP::<E>::prove(&ck, &instance, &witness, &mut transcript)?;
+
     Ok(RelaxedR1CSSNARK {
       comm_Az,
       comm_Bz,
@@ -1415,6 +1490,16 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       eval_ts_col,
 
       eval_arg,
+
+      // zibo: zerocheck PIOP
+      sc_proof_zerocheck,
+      eval_w_mid,
+      com_w_mid,
+      zerocheck_eval_arg,
+
+      // zibo: CPlnkP protocol
+      instance,
+      CPlnkP_proof,
     })
   }
 
@@ -1636,6 +1721,42 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       &u.e,
       &self.eval_arg,
     )?;
+
+
+    // zibo: zerocheck PIOP
+    let len_com_w = vk.num_vars / 2;
+    let num_rounds_zerocheck= usize::try_from(len_com_w.ilog2()).unwrap();
+    let beta: EqPolynomial<E::Scalar> = (0..num_rounds_zerocheck)
+        .map(|_i| transcript.squeeze(b"beta"))
+        .collect::<Result<EqPolynomial<E::Scalar>, NovaError>>()?;
+
+    let (claim_zerocheck, mut r_o) =
+      self
+        .sc_proof_zerocheck
+        .verify(E::Scalar::ZERO, num_rounds_zerocheck, 2, &mut transcript)?;
+
+    let beta_bound_ro = beta.evaluate(&r_o);
+
+    let claim_zerocheck_expected =
+      beta_bound_ro * E::Scalar::ZERO;
+    if claim_zerocheck != claim_zerocheck_expected {
+      return Err(NovaError::InvalidSumcheckProof);
+    }    
+
+    r_o.resize(vk.num_vars.ilog2().try_into().unwrap(), E::Scalar::ZERO); 
+
+    EE::verify(
+      &vk.vk_ee,
+      &mut transcript,
+      &self.com_w_mid,
+      &r_o,
+      &self.eval_w_mid,
+      &self.zerocheck_eval_arg,
+    )?;
+
+    // zibo: CPlnkP protocol
+    let mut transcript = E::TE::new(b"CPlnkP");
+    self.CPlnkP_proof.verify(&self.instance, &mut transcript)?;
 
     Ok(())
   }

@@ -2,26 +2,24 @@
 //! In particular, it supports any SNARK that implements `RelaxedR1CSSNARK` trait
 //! (e.g., with the SNARKs implemented in ppsnark.rs or snark.rs).
 use crate::{
-  errors::NovaError,
-  frontend::{
+  errors::NovaError, frontend::{
     num::AllocatedNum,
     r1cs::{NovaShape, NovaWitness},
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
     Circuit, ConstraintSystem, SynthesisError,
-  },
-  r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
-  traits::{
+  }, r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness}, traits::{
     circuit::StepCircuit,
     commitment::CommitmentEngineTrait,
     snark::{DigestHelperTrait, RelaxedR1CSSNARKTrait},
     Engine,
-  },
-  Commitment, CommitmentKey, DerandKey,
+  }, Commitment, CommitmentKey, DerandKey
 };
 use core::marker::PhantomData;
 use ff::Field;
 use serde::{Deserialize, Serialize};
+
+use std::time::Instant;
 
 /// A direct circuit that can be synthesized
 pub struct DirectCircuit<E: Engine, SC: StepCircuit<E::Scalar>> {
@@ -159,8 +157,10 @@ impl<E: Engine, S: RelaxedR1CSSNARKTrait<E>, C: StepCircuit<E::Scalar>> DirectSN
     // derandomize/unblind commitments
     let (derandom_w_relaxed, blind_W, blind_E) = w_relaxed.derandomize();
     let derandom_u_relaxed = u_relaxed.derandomize(&E::CE::derand_key(&pk.ck), &blind_W, &blind_E);
-
+    
+    
     // prove the instance using Spartan
+    let start = Instant::now(); 
     let snark = S::prove(
       &pk.ck,
       &pk.pk,
@@ -168,6 +168,14 @@ impl<E: Engine, S: RelaxedR1CSSNARKTrait<E>, C: StepCircuit<E::Scalar>> DirectSN
       &derandom_u_relaxed,
       &derandom_w_relaxed,
     )?;
+    let duration = start.elapsed();
+    println!(
+      "Proving time: {} ms",
+      duration.as_millis()
+    );
+
+    let serialized_proof = bincode::serialize(&snark).expect("Serialization failed");
+    println!("Serialized proof size: {} bytes", serialized_proof.len());
 
     Ok(DirectSNARK {
       comm_W: u.comm_W,
@@ -186,7 +194,13 @@ impl<E: Engine, S: RelaxedR1CSSNARKTrait<E>, C: StepCircuit<E::Scalar>> DirectSN
     let u_relaxed = RelaxedR1CSInstance::from_r1cs_instance_unchecked(&comm_W, io);
 
     // verify the snark using the constructed instance
+    let start = Instant::now(); 
     self.snark.verify(&vk.vk, &u_relaxed)?;
+    let duration = start.elapsed();
+    println!(
+      "Verification time: {} ms",
+      duration.as_millis()
+    );
 
     Ok(())
   }
@@ -217,6 +231,7 @@ mod tests {
       cs: &mut CS,
       z: &[AllocatedNum<F>],
     ) -> Result<Vec<AllocatedNum<F>>, SynthesisError> {
+      /*
       // Consider a cubic equation: `x^3 + x + 5 = y`, where `x` and `y` are respectively the input and output.
       let x = &z[0];
       let x_sq = x.square(cs.namespace(|| "x_sq"))?;
@@ -241,6 +256,40 @@ mod tests {
       );
 
       Ok(vec![y])
+      */
+
+      // zibo
+      // Consider a cubic equation: `x^pow + x + 5 = y`, where `x` and `y` are respectively the input and output.
+      let pow = 1 << 2;
+
+      let x = &z[0];
+
+      let mut x_pow = x.clone();
+      for i in 1..=pow {
+        x_pow = x_pow.mul(cs.namespace(|| format!("x_pow_{i}")), x)?;
+      }
+
+      let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
+        Ok(x_pow.get_value().unwrap() + x.get_value().unwrap() + F::from(5u64))
+      })?;
+      
+      cs.enforce(
+        || "y = x^pow + x + 5",
+        |lc| {
+          lc + x_pow.get_variable()
+            + x.get_variable()
+            + CS::one()
+            + CS::one()
+            + CS::one()
+            + CS::one()
+            + CS::one()
+        },
+        |lc| lc + CS::one(),
+        |lc| lc + y.get_variable(),
+      );
+
+      Ok(vec![y])
+
     }
   }
 
@@ -255,8 +304,11 @@ mod tests {
     type E = PallasEngine;
     type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
     type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
+
+    // println!("Testing direct SNARKs");
     test_direct_snark_with::<E, S>();
 
+    // println!("Testing direct SNARKs with ppsnark");
     type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E, EE>;
     test_direct_snark_with::<E, Spp>();
 
@@ -276,6 +328,7 @@ mod tests {
     type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E3, EE3>;
     test_direct_snark_with::<E3, S3pp>();
   }
+
 
   fn test_direct_snark_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
     let circuit = CubicCircuit::default();
@@ -314,5 +367,97 @@ mod tests {
 
     // sanity: check the claimed output with a direct computation of the same
     assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
+  }
+
+
+  // zibo
+  #[test]
+  fn test_cpsnark_kzg() {
+    type E = Bn256EngineKZG;
+    type EE = crate::provider::hyperkzg::EvaluationEngine<E>;
+    type S = crate::spartan::ppsnark::RelaxedR1CSSNARK<E, EE>;
+    test_cpsnark_kzg_with::<E, S>();
+  }
+
+  fn test_cpsnark_kzg_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
+    let circuit = CubicCircuit::default();
+
+    // produce keys
+    let (pk, vk) =
+      DirectSNARK::<E, S, CubicCircuit<<E as Engine>::Scalar>>::setup(circuit.clone()).unwrap();
+    // println!("R1CS shape{:?}", pk.S);
+    println!("num_cons: {:?}", pk.S.num_cons);
+    println!("num_vars: {:?}", pk.S.num_vars);
+    println!("num_io: {:?}", pk.S.num_io);
+
+    // setup inputs
+    let z_i = vec![<E as Engine>::Scalar::ZERO];
+
+    // produce a SNARK
+    let res = DirectSNARK::prove(&pk, circuit.clone(), &z_i);
+    assert!(res.is_ok());
+
+    let z_i_plus_one = circuit.output(&z_i);
+
+    let snark = res.unwrap();
+
+    // verify the SNARK
+    let io = z_i
+      .clone()
+      .into_iter()
+      .chain(z_i_plus_one.clone())
+      .collect::<Vec<_>>();
+    let res = snark.verify(&vk, &io);
+    res.unwrap();
+    // assert!(res.is_ok());
+
+    // sanity: check the claimed output with a direct computation of the same
+    // zibo
+    // assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
+  }
+
+  #[test]
+  fn test_cpsnark_dl() {
+    type E = Secp256k1Engine;
+    type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
+    type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
+    test_cpsnark_dl_with::<E, S>();
+  }
+
+  fn test_cpsnark_dl_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
+    let circuit = CubicCircuit::default();
+
+    // produce keys
+    let (pk, vk) =
+      DirectSNARK::<E, S, CubicCircuit<<E as Engine>::Scalar>>::setup(circuit.clone()).unwrap();
+    // println!("R1CS shape{:?}", pk.S);
+    println!("num_cons: {:?}", pk.S.num_cons);
+    println!("num_vars: {:?}", pk.S.num_vars);
+    println!("num_io: {:?}", pk.S.num_io);
+
+    // setup inputs
+    let z_i = vec![<E as Engine>::Scalar::ZERO];
+
+    // produce a SNARK
+    let res = DirectSNARK::prove(&pk, circuit.clone(), &z_i);
+    assert!(res.is_ok());
+
+    let z_i_plus_one = circuit.output(&z_i);
+
+    let snark = res.unwrap();
+
+    // verify the SNARK
+    let io = z_i
+      .clone()
+      .into_iter()
+      .chain(z_i_plus_one.clone())
+      .collect::<Vec<_>>();
+    let res = snark.verify(&vk, &io);
+    res.unwrap();
+    // assert!(res.is_ok());
+
+    // sanity: check the claimed output with a direct computation of the same
+    // zibo
+    // assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
   }
 }

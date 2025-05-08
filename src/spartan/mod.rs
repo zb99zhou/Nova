@@ -50,9 +50,11 @@ impl<E: Engine> PolyEvalWitness<E> {
   fn batch_diff_size(W: Vec<PolyEvalWitness<E>>, s: E::Scalar) -> PolyEvalWitness<E> {
     let powers = powers::<E>(&s, W.len());
 
+    
     let size_max = W.iter().map(|w| w.p.len()).max().unwrap();
     // Scale the input polynomials by the power of s
     let num_chunks = rayon::current_num_threads().next_power_of_two();
+
     let chunk_size = size_max / num_chunks;
 
     let p = if chunk_size > 0 {
