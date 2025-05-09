@@ -6,7 +6,7 @@
 //! We have not yet proven the security of these optimizations, so this code is subject to significant changes in the future.
 use crate::{
   digest::{DigestComputer, SimpleDigestible}, errors::NovaError, 
-  provider::hyperkzg::{CPlnkP, CPlnkPInstance, CPlnkPWitness, CommitmentKeyExtTrait},
+  provider::hyperkzg::{CPlnkP, CPlnkPInstance, CPlnkPWitness, /*CommitmentKeyExtTrait*/},
   r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness}, spartan::{
     math::Math,
     polys::{
@@ -32,6 +32,7 @@ use itertools::Itertools as _;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use crate::provider::hyperkzg::CommitmentKeyExtTrait;
 
 fn padded<E: Engine>(v: &[E::Scalar], n: usize, e: &E::Scalar) -> Vec<E::Scalar> {
   let mut v_padded = vec![*e; n];
@@ -921,7 +922,10 @@ pub struct RelaxedR1CSSNARK<E: Engine, EE: EvaluationEngineTrait<E>> {
   CPlnkP_proof: CPlnkP<E>,
 }
 
-impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARK<E, EE> {
+impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARK<E, EE>
+where
+    <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey: CommitmentKeyExtTrait<E>,
+{
   fn prove_helper<T1, T2, T3, T4>(
     mem: &mut T1,
     outer: &mut T2,
@@ -1061,8 +1065,8 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> DigestHelperTrait<E> for VerifierK
 }
 
 impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for RelaxedR1CSSNARK<E, EE> 
-  // where 
-  // <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey: CommitmentKeyExtTrait<E>,
+  where
+  <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey: CommitmentKeyExtTrait<E>,
 {
   type ProverKey = ProverKey<E, EE>;
   type VerifierKey = VerifierKey<E, EE>;

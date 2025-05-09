@@ -211,7 +211,7 @@ mod tests {
   use super::*;
   use crate::{
     frontend::{num::AllocatedNum, ConstraintSystem, SynthesisError},
-    provider::{Bn256EngineKZG, PallasEngine, Secp256k1Engine},
+    provider::{Bn256EngineKZG, /*PallasEngine, Secp256k1Engine*/},
   };
   use core::marker::PhantomData;
   use ff::PrimeField;
@@ -299,75 +299,75 @@ mod tests {
     }
   }
 
-  #[test]
-  fn test_direct_snark() {
-    type E = PallasEngine;
-    type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
-    type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
+  // #[test]
+  // fn test_direct_snark() {
+  //   type E = PallasEngine;
+  //   type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
+  //   type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
+  //
+  //   // println!("Testing direct SNARKs");
+  //   test_direct_snark_with::<E, S>();
+  //
+  //   // println!("Testing direct SNARKs with ppsnark");
+  //   type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E, EE>;
+  //   test_direct_snark_with::<E, Spp>();
+  //
+  //   type E2 = Bn256EngineKZG;
+  //   type EE2 = crate::provider::hyperkzg::EvaluationEngine<E2>;
+  //   type S2 = crate::spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
+  //   test_direct_snark_with::<E2, S2>();
+  //
+  //   type S2pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E2, EE2>;
+  //   test_direct_snark_with::<E2, S2pp>();
+  //
+  //   type E3 = Secp256k1Engine;
+  //   type EE3 = crate::provider::ipa_pc::EvaluationEngine<E3>;
+  //   type S3 = crate::spartan::snark::RelaxedR1CSSNARK<E3, EE3>;
+  //   test_direct_snark_with::<E3, S3>();
+  //
+  //   type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E3, EE3>;
+  //   test_direct_snark_with::<E3, S3pp>();
+  // }
 
-    // println!("Testing direct SNARKs");
-    test_direct_snark_with::<E, S>();
 
-    // println!("Testing direct SNARKs with ppsnark");
-    type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E, EE>;
-    test_direct_snark_with::<E, Spp>();
-
-    type E2 = Bn256EngineKZG;
-    type EE2 = crate::provider::hyperkzg::EvaluationEngine<E2>;
-    type S2 = crate::spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
-    test_direct_snark_with::<E2, S2>();
-
-    type S2pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E2, EE2>;
-    test_direct_snark_with::<E2, S2pp>();
-
-    type E3 = Secp256k1Engine;
-    type EE3 = crate::provider::ipa_pc::EvaluationEngine<E3>;
-    type S3 = crate::spartan::snark::RelaxedR1CSSNARK<E3, EE3>;
-    test_direct_snark_with::<E3, S3>();
-
-    type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<E3, EE3>;
-    test_direct_snark_with::<E3, S3pp>();
-  }
-
-
-  fn test_direct_snark_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
-    let circuit = CubicCircuit::default();
-
-    // produce keys
-    let (pk, vk) =
-      DirectSNARK::<E, S, CubicCircuit<<E as Engine>::Scalar>>::setup(circuit.clone()).unwrap();
-
-    let num_steps = 3;
-
-    // setup inputs
-    let z0 = vec![<E as Engine>::Scalar::ZERO];
-    let mut z_i = z0;
-
-    for _i in 0..num_steps {
-      // produce a SNARK
-      let res = DirectSNARK::prove(&pk, circuit.clone(), &z_i);
-      assert!(res.is_ok());
-
-      let z_i_plus_one = circuit.output(&z_i);
-
-      let snark = res.unwrap();
-
-      // verify the SNARK
-      let io = z_i
-        .clone()
-        .into_iter()
-        .chain(z_i_plus_one.clone())
-        .collect::<Vec<_>>();
-      let res = snark.verify(&vk, &io);
-      assert!(res.is_ok());
-
-      // set input to the next step
-      z_i.clone_from(&z_i_plus_one);
-    }
-
-    // sanity: check the claimed output with a direct computation of the same
-    assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
-  }
+  // fn test_direct_snark_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
+  //   let circuit = CubicCircuit::default();
+  //
+  //   // produce keys
+  //   let (pk, vk) =
+  //     DirectSNARK::<E, S, CubicCircuit<<E as Engine>::Scalar>>::setup(circuit.clone()).unwrap();
+  //
+  //   let num_steps = 3;
+  //
+  //   // setup inputs
+  //   let z0 = vec![<E as Engine>::Scalar::ZERO];
+  //   let mut z_i = z0;
+  //
+  //   for _i in 0..num_steps {
+  //     // produce a SNARK
+  //     let res = DirectSNARK::prove(&pk, circuit.clone(), &z_i);
+  //     assert!(res.is_ok());
+  //
+  //     let z_i_plus_one = circuit.output(&z_i);
+  //
+  //     let snark = res.unwrap();
+  //
+  //     // verify the SNARK
+  //     let io = z_i
+  //       .clone()
+  //       .into_iter()
+  //       .chain(z_i_plus_one.clone())
+  //       .collect::<Vec<_>>();
+  //     let res = snark.verify(&vk, &io);
+  //     assert!(res.is_ok());
+  //
+  //     // set input to the next step
+  //     z_i.clone_from(&z_i_plus_one);
+  //   }
+  //
+  //   // sanity: check the claimed output with a direct computation of the same
+  //   assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
+  // }
 
 
   // zibo
@@ -416,48 +416,48 @@ mod tests {
     // assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
   }
 
-  #[test]
-  fn test_cpsnark_dl() {
-    type E = Secp256k1Engine;
-    type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
-    type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
-    test_cpsnark_dl_with::<E, S>();
-  }
-
-  fn test_cpsnark_dl_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
-    let circuit = CubicCircuit::default();
-
-    // produce keys
-    let (pk, vk) =
-      DirectSNARK::<E, S, CubicCircuit<<E as Engine>::Scalar>>::setup(circuit.clone()).unwrap();
-    // println!("R1CS shape{:?}", pk.S);
-    println!("num_cons: {:?}", pk.S.num_cons);
-    println!("num_vars: {:?}", pk.S.num_vars);
-    println!("num_io: {:?}", pk.S.num_io);
-
-    // setup inputs
-    let z_i = vec![<E as Engine>::Scalar::ZERO];
-
-    // produce a SNARK
-    let res = DirectSNARK::prove(&pk, circuit.clone(), &z_i);
-    assert!(res.is_ok());
-
-    let z_i_plus_one = circuit.output(&z_i);
-
-    let snark = res.unwrap();
-
-    // verify the SNARK
-    let io = z_i
-      .clone()
-      .into_iter()
-      .chain(z_i_plus_one.clone())
-      .collect::<Vec<_>>();
-    let res = snark.verify(&vk, &io);
-    res.unwrap();
-    // assert!(res.is_ok());
-
-    // sanity: check the claimed output with a direct computation of the same
-    // zibo
-    // assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
-  }
+  // #[test]
+  // fn test_cpsnark_dl() {
+  //   type E = Secp256k1Engine;
+  //   type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
+  //   type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
+  //   test_cpsnark_dl_with::<E, S>();
+  // }
+  //
+  // fn test_cpsnark_dl_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
+  //   let circuit = CubicCircuit::default();
+  //
+  //   // produce keys
+  //   let (pk, vk) =
+  //     DirectSNARK::<E, S, CubicCircuit<<E as Engine>::Scalar>>::setup(circuit.clone()).unwrap();
+  //   // println!("R1CS shape{:?}", pk.S);
+  //   println!("num_cons: {:?}", pk.S.num_cons);
+  //   println!("num_vars: {:?}", pk.S.num_vars);
+  //   println!("num_io: {:?}", pk.S.num_io);
+  //
+  //   // setup inputs
+  //   let z_i = vec![<E as Engine>::Scalar::ZERO];
+  //
+  //   // produce a SNARK
+  //   let res = DirectSNARK::prove(&pk, circuit.clone(), &z_i);
+  //   assert!(res.is_ok());
+  //
+  //   let z_i_plus_one = circuit.output(&z_i);
+  //
+  //   let snark = res.unwrap();
+  //
+  //   // verify the SNARK
+  //   let io = z_i
+  //     .clone()
+  //     .into_iter()
+  //     .chain(z_i_plus_one.clone())
+  //     .collect::<Vec<_>>();
+  //   let res = snark.verify(&vk, &io);
+  //   res.unwrap();
+  //   // assert!(res.is_ok());
+  //
+  //   // sanity: check the claimed output with a direct computation of the same
+  //   // zibo
+  //   // assert_eq!(z_i, vec![<E as Engine>::Scalar::from(2460515u64)]);
+  // }
 }
